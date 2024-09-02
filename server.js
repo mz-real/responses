@@ -155,6 +155,7 @@ const modifyPsdFile = async (formData, signatureFilePath) => {
         tokenPromise,
         uploadToDropbox(randomPhotoPath),
         uploadToDropbox(signatureFilePath)
+
     ]);
     console.log("🚀 ~ modifyPsdFile ~ getLink, uploadLink,token, photoDropboxPath, signatureDropboxPath:", getLink, uploadLink,token, photoDropboxPath, signatureDropboxPath)
 
