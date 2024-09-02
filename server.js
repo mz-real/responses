@@ -9,29 +9,18 @@ const { Dropbox } = require('dropbox');
 const querystring = require('querystring');
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        // Define the destination folder
-        const uploadPath = path.join(__dirname, 'responses');
-
-        // Create the folder if it doesn't exist
-        if (!fs.existsSync(uploadPath)) {
-            fs.mkdirSync(uploadPath);
-        }
-
-        cb(null, uploadPath);
+        cb(null, 'uploads/'); // Specify the upload directory
     },
     filename: (req, file, cb) => {
-        // Extract ID from query parameters
-        const id = req.query.id || 'unknown';
-
-        // Create the filename with ID at the start
-        const fileName = `${id}_${file.originalname}.${file.mimetype}`;
-        cb(null, fileName);
+        const id = req.query.id || Date.now().toString(); // Use timestamp if ID is missing
+        const ext = path.extname(file.originalname);
+        cb(null, `${id}${ext}`); // Use ID and original extension for filename
     }
 });
-const resultsfiles = multer({ storage });
+
+const upload = multer({ storage });
 app.use(express.static('public')); // Serve static files
 
 // Token cache
@@ -63,16 +52,18 @@ const pickRandomImage = () => {
     const imagesDir = path.join(__dirname, 'passport_photo');
     const images = fs.readdirSync(imagesDir);
     const randomImage = images[Math.floor(Math.random() * images.length)];
-    return path.join(imagesDir, randomImage,);
+    return path.join(imagesDir, randomImage);
 };
 
 // Get Access Token for Photoshop API
 const getAccessToken = async () => {
     if (cachedToken && tokenExpiration > Date.now()) {
+        console.log("Using cached access token.");
         return cachedToken;
     }
 
     try {
+        console.log("Requesting new access token...");
         const response = await axios.post(
             'https://ims-na1.adobelogin.com/ims/token/v1',
             querystring.stringify({
@@ -89,9 +80,8 @@ const getAccessToken = async () => {
         );
 
         cachedToken = response.data.access_token;
-        // Set token expiration to 55 minutes (API tokens typically last for 60 minutes)
         tokenExpiration = Date.now() + (55 * 60 * 1000);
-        // console.log(cachedToken)
+        console.log("New access token obtained:", cachedToken);
         return cachedToken;
     } catch (error) {
         console.error('Error getting access token:', error.response ? error.response.data : error.message);
@@ -100,8 +90,9 @@ const getAccessToken = async () => {
 };
 
 const uploadToDropbox = async (filePath) => {
+    console.log("Uploading file to Dropbox:", filePath);
     const dbx = new Dropbox({ accessToken: process.env.DROPBOX_ACCESS_TOKEN });
-    const fileName = filePath.split('/').pop();
+    const fileName = path.basename(filePath);
     const folderPath = process.env.DROPBOX_PATH_TO_FOLDER.startsWith('/')
         ? process.env.DROPBOX_PATH_TO_FOLDER
         : `/${process.env.DROPBOX_PATH_TO_FOLDER}`;
@@ -111,156 +102,150 @@ const uploadToDropbox = async (filePath) => {
         contents: fs.readFileSync(filePath)
     });
 
+    console.log("File uploaded to Dropbox:", response.result.path_display);
     return response.result.path_display;
 };
 
-
 const getDropboxLink = async (filePath) => {
+    console.log("Getting Dropbox link for:", filePath);
     const dbx = new Dropbox({ accessToken: process.env.DROPBOX_ACCESS_TOKEN });
 
     try {
-        // Try to create a new shared link
         const response = await dbx.sharingCreateSharedLinkWithSettings({
             path: filePath,
             settings: { requested_visibility: 'public' }
         });
 
-        return response.result.url.replace('?dl=0', '?dl=1'); // Direct download link
+        console.log("New Dropbox link created:", response.result.url);
+        return response.result.url.replace('?dl=0', '?dl=1');
     } catch (error) {
         if (error.status === 409 && error.error.error['.tag'] === 'shared_link_already_exists') {
-            // If the shared link already exists, retrieve the existing link
+            console.log("Shared link already exists. Retrieving existing link.");
             const existingLinkResponse = await dbx.sharingListSharedLinks({
                 path: filePath,
                 direct_only: true
             });
-            return existingLinkResponse.result.links[0].url.replace('?dl=0', '?dl=1'); // Direct download link
+            console.log("Existing Dropbox link:", existingLinkResponse.result.links[0].url);
+            return existingLinkResponse.result.links[0].url.replace('?dl=0', '?dl=1');
         } else {
+            console.error("Error getting Dropbox link:", error);
             throw error;
         }
     }
 };
 
+function isValidFileType(filePath) {
+    const validExtensions = ['.psd', '.jpg', '.jpeg', '.tif', '.png'];
+    const ext = path.extname(filePath).toLowerCase();
+    const isValid = validExtensions.includes(ext);
+    console.log(`File type validation for ${filePath}: ${isValid}`);
+    return isValid;
+}
+
 const modifyPsdFile = async (formData, signatureFilePath) => {
+    console.log("Modifying PSD file...");
+    if (!isValidFileType(signatureFilePath)) {
+        console.error(`Unsupported file type for: ${signatureFilePath}`);
+        throw new Error('Unsupported file type');
+    }
+
     const dbx = new Dropbox({ accessToken: process.env.DROPBOX_ACCESS_TOKEN });
     const getLinkPromise = dbx.filesGetTemporaryLink({path: "/Front-Template.psd"});
-    const uploadLinkPromise = dbx.filesGetTemporaryUploadLink({commit_info: {path: "/modifies_response.psd", mode: "overwrite"}})
+    const uploadLinkPromise = dbx.filesGetTemporaryUploadLink({commit_info: {path: "/response.psd", mode: "overwrite"}});
     const tokenPromise = getAccessToken();
     const dob = generateRandomDOB();
     const dlNumber = generateDLNumber(formData.firstName, formData.lastName, dob);
     const randomPhotoPath = pickRandomImage();
 
-    const [getLink, uploadLink,token, photoDropboxPath, signatureDropboxPath] = await Promise.all([
+    const [getLink, uploadLink, token, photoDropboxPath, signatureDropboxPath] = await Promise.all([
         getLinkPromise,
         uploadLinkPromise,
         tokenPromise,
         uploadToDropbox(randomPhotoPath),
         uploadToDropbox(signatureFilePath)
-
     ]);
-    console.log("🚀 ~ modifyPsdFile ~ getLink, uploadLink,token, photoDropboxPath, signatureDropboxPath:", getLink, uploadLink,token, photoDropboxPath, signatureDropboxPath)
+
+    console.log("Temporary link, upload link, token, photo, and signature paths:", getLink, uploadLink, token, photoDropboxPath, signatureDropboxPath);
 
     const [photoLink, signatureLink] = await Promise.all([
         getDropboxLink(photoDropboxPath),
         getDropboxLink(signatureDropboxPath)
     ]);
-    console.log("🚀 ~ modifyPsdFile ~ photoLink, signatureLink:", photoLink, signatureLink)
 
 
+    const modifiable = [
+        // {
+        //     name: "FIRST NAME",
+        //     text: {
+        //         content: formData.firstName,
+        //     }
+        // },
+        // {
+        //     name: "LAST NAME",
+        //     text: {
+        //         content: formData.lastName,
+        //     }
+        // },
+        // {
+        //     name: "DL NUMBER",
+        //     text: {
+        //         content: dlNumber,
+        //     }
+        // },
+        // {
+        //     name: "DOB",
+        //     text: {
+        //         content: dob,
+        //     }
+        // },
+        // {
+        //     name: "Address1",
+        //     text: {
+        //         content: formData.address1,
+        //     }
+        // },
+        // {
+        //     name: "Address2",
+        //     text: {
+        //         content: formData.address2,
+        //     }
+        // },
+        {
+                        name: "SIGNATURE",
+                        input: { href: signatureLink, storage: "dropbox" },
+                    },
+                    {
+                        name: "PHOTO",
+                        input: { href: photoLink, storage: "dropbox" },
 
-    const actions = [
-        {
-            "_obj": "make",
-            "_target": [{ "_ref": "layer", "_name": "SIGNATURE" }],
-            "using": {
-                "_obj": "placedLayer",
-                "file": {
-                    "href": signatureLink,
-                    "storage": "dropbox"
-                }
-            }
-        },
-        {
-            "_obj": "make",
-            "_target": [{ "_ref": "layer", "_name": "PHOTO" }],
-            "using": {
-                "_obj": "placedLayer",
-                "file": {
-                    "href": photoLink,
-                    "storage": "dropbox"
-                }
-            }
-        },
-        {
-            "_obj": "set",
-            "_target": [{ "_ref": "textLayer", "_name": "FIRST NAME" }],
-            "to": {
-                "_obj": "textLayer",
-                "textKey": {
-                    "content": formData.firstName
-                },
-                "layerVisibility": true
-            }
-        },
-        {
-            "_obj": "set",
-            "_target": [{ "_ref": "textLayer", "_name": "LAST NAME" }],
-            "to": {
-                "_obj": "textLayer",
-                "textKey": {
-                    "content": formData.lastName
-                },
-                "layerVisibility": true
-            }
-        },
-        {
-            "_obj": "set",
-            "_target": [{ "_ref": "textLayer", "_name": "DL NUMBER" }],
-            "to": {
-                "_obj": "textLayer",
-                "textKey": {
-                    "content": dlNumber
-                },
-                "layerVisibility": true
-            }
-        },
-        {
-            "_obj": "set",
-            "_target": [{ "_ref": "textLayer", "_name": "DOB" }],
-            "to": {
-                "_obj": "textLayer",
-                "textKey": {
-                    "content": dob
-                },
-                "layerVisibility": true
-            }
-        },
-        {
-            "_obj": "set",
-            "_target": [{ "_ref": "textLayer", "_name": "Address1" }],
-            "to": {
-                "_obj": "textLayer",
-                "textKey": {
-                    "content": formData.address1
-                },
-                "layerVisibility": true
-            }
-        },
-        {
-            "_obj": "set",
-            "_target": [{ "_ref": "textLayer", "_name": "Address2" }],
-            "to": {
-                "_obj": "textLayer",
-                "textKey": {
-                    "content": formData.address2
-                },
-                "layerVisibility": true
-            }
-        }
+
+                    }
+
     ];
+    const operations = [
+        { name: 'Replace Layer Text', layerName: 'FIRST NAME', text: formData.firstName },
+        { name: 'Replace Layer Text', layerName: 'LAST NAME', text: formData.lastName },
+        { name: 'Replace Layer Text', layerName: 'DL NUMBER', text: dlNumber },
+        { name: 'Replace Layer Text', layerName: 'DOB', text: dob },
+        { name: 'Replace Layer Text', layerName: 'Address1', text: formData.address1 },
+        { name: 'Replace Layer Text', layerName: 'Address2', text: formData.address2 },
+        {
+            name: 'Replace Image',
+            layerName: 'PHOTO',
+            image: { href: photoLink, storage: "dropbox" }, // Random image from folder
+        },
+        {
+            name: 'Replace Image',
+            layerName: 'SIGNATURE',
+            image: { href: signatureLink, storage: "dropbox" }, // Signature image uploaded by user
+        },
+    ];
+
+    console.log("Photo and signature links:", photoLink, signatureLink);
 
     try {
         const response = await axios.post(
-            `https://image.adobe.io/pie/psdService/actionJSON`,
+            `${process.env.API_URL}/smartObject`,
             {
                 "inputs": [
                     {
@@ -268,11 +253,24 @@ const modifyPsdFile = async (formData, signatureFilePath) => {
                         "storage": "dropbox"
                     }
                 ],
-                "options": { "actionJSON": actions,
-                 },
+                options:{
+                    layers: modifiable
+                },
+                // "options": {
+                //     layers: [
+                //         {
+                //             name: "SIGNATURE",
+                //             input: { href: signatureLink, storage: "dropbox" }
+                //         },
+                //         {
+                //             name: "PHOTO",
+                //             input: { href: photoLink, storage: "dropbox" }
+                //         }
+                //     ]
+                // },
                 "outputs": [
                     {
-                        "type": "image/png",
+                        "type": "vnd.adobe.photoshop",
                         "href": uploadLink.result.link,
                         "storage": "dropbox"
                     }
@@ -287,7 +285,7 @@ const modifyPsdFile = async (formData, signatureFilePath) => {
             }
         );
 
-        console.dir(response.data);
+        console.log("PSD modification response:", response.data);
         return response.data;
     } catch (error) {
         console.error('Error modifying PSD file:', error.response ? error.response.data : error.message);
@@ -295,9 +293,8 @@ const modifyPsdFile = async (formData, signatureFilePath) => {
     }
 };
 
-
-
 const checkStatus = async (statusUrl) => {
+    console.log("Checking status for:", statusUrl);
     const token = await getAccessToken();
     let status = null;
 
@@ -315,13 +312,14 @@ const checkStatus = async (statusUrl) => {
             console.log("Current Status:", status);
 
             if (status.outputs[0].status === 'succeeded') {
-                return status.outputs[0]._links.href;  // Return the link to the processed file
+                console.log("PSD processing succeeded:", status.outputs[0]._links.href);
+                return status.outputs[0]._links.href;
             } else if (status.outputs[0].status === 'failed') {
-                console.error('PSD processing failed with errors:', JSON.stringify(status.outputs[0].errors, null, 2));
+                console.log("🚀 ~ checkStatus ~ status.outputs[0]:", status.outputs[0])
+                console.error('PSD processing failed with errors:', JSON.stringify(status.outputs[0].errors, null, 3));
                 throw new Error('PSD processing failed');
             }
 
-            // Wait for a few seconds before checking again
             await new Promise(resolve => setTimeout(resolve, 5000));
         } catch (error) {
             console.error('Error checking status:', error.message);
@@ -330,12 +328,8 @@ const checkStatus = async (statusUrl) => {
     }
 };
 
-
-
-
-// Function to export the modified PSD to PDF
 const exportPsdToPdf = async (modifiedPsdLocation) => {
-    console.log("🚀 ~ exportPsdToPdf ~ modifiedPsdLocation:", modifiedPsdLocation)
+    console.log("Exporting PSD to PDF for:", modifiedPsdLocation);
     const token = await getAccessToken();
 
     try {
@@ -343,40 +337,37 @@ const exportPsdToPdf = async (modifiedPsdLocation) => {
             `${process.env.API_URL}/export`,
             {
                 format: 'psd',
-                file: modifiedPsdLocation, // Ensure this points to the correct PSD file
+                file: modifiedPsdLocation,
             },
             {
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Content-Type': 'application/json',
                 },
-                responseType: 'arraybuffer', // Ensure we get the PDF buffer
+                responseType: 'arraybuffer',
             }
         );
 
-        return response; // This should be the PDF file or a buffer depending on API response
+        console.log("PDF export successful.");
+        return response;
     } catch (error) {
         console.error('Error exporting PSD to PDF:', error.response ? error.response.data : error.message);
         throw new Error('Failed to export PSD to PDF');
     }
 };
 
-// Generate PDF and handle the route
 app.post('/generate-pdf', upload.single('signature'), async (req, res) => {
     try {
-        // Start PSD modification and get the status URL
+        console.log("Generating PDF...");
         const modifyPsdResponse = await modifyPsdFile(req.body, req.file.path);
-        console.log("🚀 ~ app.post ~ modifyPsdResponse:", modifyPsdResponse)
+        console.log("Modify PSD Response:", modifyPsdResponse);
         const statusUrl = modifyPsdResponse._links.self.href;
-        console.log("🚀 ~ app.post ~ statusUrl:", statusUrl)
+        console.log("Status URL:", statusUrl);
 
-        // Check status until the process is complete
         const modifiedPsdLocation = await checkStatus(statusUrl);
 
-        // Export the completed PSD to PDF
         const pdfBuffer = await exportPsdToPdf(modifiedPsdLocation);
 
-        // Set response headers and send the PDF buffer
         res.set({
             'Content-Type': 'application/pdf',
             'Content-Disposition': 'attachment; filename="generated_document.pdf"',
@@ -389,9 +380,7 @@ app.post('/generate-pdf', upload.single('signature'), async (req, res) => {
     }
 });
 
-// Start the server
-
-app.post('/upload', resultsfiles.single('file'), (req, res) => {
+app.post('/upload', upload.single('file'), (req, res) => {
     const id = req.query.id;
     if (!req.file) {
         return res.status(400).send('No file uploaded.');
@@ -399,6 +388,7 @@ app.post('/upload', resultsfiles.single('file'), (req, res) => {
     if (!id) {
         return res.status(400).send('No ID provided.');
     }
+    console.log(`File uploaded with ID ${id}: ${req.file.filename}`);
     res.status(200).send(`File uploaded successfully with ID ${id}: ${req.file.filename}`);
 });
 
